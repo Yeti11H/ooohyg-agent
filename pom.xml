@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+    <parent>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-starter-parent</artifactId>
+        <version>3.4.4</version>
+        <relativePath/> <!-- lookup parent from repository -->
+    </parent>
+    <groupId>com.ooohyg</groupId>
+    <artifactId>ooohyg-agent</artifactId>
+    <version>0.0.1-SNAPSHOT</version>
+    <name>ooohyg-agent</name>
+    <description>自研 AI Agent 框架（com.ooohyg.agent）：core 执行容器 + ReAct/Plan/Reflexion 策略</description>
+
+    <properties>
+        <java.version>21</java.version>
+    </properties>
+
+    <!--
+      依赖说明（按当前源码实际使用生成）：
+      - 主模块 src/main/java 下 32 个类为纯 JDK 实现，零外部依赖（仅 java.util 等）；
+      - spring-boot-starter 仅作为 Spring Boot 应用骨架保留，接入 web / 数据库 / AI 时按需添加；
+      - 原底子 pom 中的 spring-ai-alibaba(dashscope)、ollama、pgvector/RAG、mcp-client、
+        langchain4j、kryo、jsoup、itext、knife4j 等依赖在当前代码中无任何引用，已移除；
+      - yu-image-search-mcp-server 为独立 Maven 子工程，自带 pom.xml，不在此处管理。
+    -->
+    <dependencies>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <!-- 主模块已新增 OoohygAgentApplication 启动类，repackage 可正常执行 -->
+            <plugin>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-maven-plugin</artifactId>
+                <configuration>
+                    <skip>false</skip>
+                </configuration>
+            </plugin>
+        </plugins>
+    </build>
+</project>

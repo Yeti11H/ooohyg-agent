@@ -1,0 +1,21 @@
+spring:
+  application:
+    name: ooohyg-agent
+  profiles:
+    active: dev
+
+server:
+  port: 8123
+  servlet:
+    context-path: /api
+
+# ============================================================
+# 配置说明（按当前代码实际使用生成）：
+# - 主模块 com.ooohyg.agent 源码为纯 JDK 实现，未读取任何外部
+#   配置项（无 @Value / @ConfigurationProperties / spring.ai 使用）；
+# - 原底子项目 application.yml 中的 dashscope / ollama / pgvector /
+#   mcp-client / search-api / knife4j / springdoc 等配置均为残留，
+#   当前代码无对应使用，已移除；
+# - 后续接入 Spring AI、数据源、Redis、MCP 等时，将对应配置
+#   补充到本文件或 application-dev.yml。
+# ============================================================

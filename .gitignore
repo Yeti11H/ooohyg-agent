@@ -1,0 +1,59 @@
+# ===== Maven 构建产物 =====
+target/
+!.mvn/wrapper/maven-wrapper.jar
+!**/src/main/**/target/
+!**/src/test/**/target/
+
+# ===== Java 编译产物 =====
+*.class
+*.jar
+*.war
+*.ear
+*.nar
+hs_err_pid*
+replay_pid*
+
+# ===== IDE: IntelliJ IDEA =====
+.idea/
+*.iws
+*.iml
+*.ipr
+out/
+
+# ===== IDE: Eclipse =====
+.apt_generated
+.classpath
+.factorypath
+.project
+.settings
+.springBeans
+.sts4-cache
+
+# ===== IDE: NetBeans =====
+/nbproject/private/
+/nbbuild/
+/dist/
+/nbdist/
+/.nb-gradle/
+build/
+
+# ===== IDE: VS Code =====
+.vscode/
+
+# ===== 操作系统 =====
+.DS_Store
+Thumbs.db
+*.swp
+*~
+
+# ===== 日志与临时文件 =====
+*.log
+logs/
+*.tmp
+*.bak
+
+# ===== 本地环境配置（不应提交） =====
+.env
+.env.local
+application-local.yml
+application-local.properties

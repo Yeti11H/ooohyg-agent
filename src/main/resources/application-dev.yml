@@ -1,0 +1,6 @@
+# 本地开发环境配置
+# 当前无额外配置项，此文件仅为 spring.profiles.active=dev 提供占位；
+# 后续需要本地差异配置（如不同端口、日志级别）时补充到此处。
+logging:
+  level:
+    root: info
