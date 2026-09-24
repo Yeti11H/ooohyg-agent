@@ -1,12 +1,13 @@
 package com.ooohyg.agent.core.base;
 
-import com.ooohyg.agent.core.base.AgentState;
 import com.ooohyg.agent.core.exception.AgentException;
 import com.ooohyg.agent.core.execution.AgentContext;
 import com.ooohyg.agent.core.execution.DefaultAgentContext;
 import com.ooohyg.agent.core.execution.ExecutionId;
 import com.ooohyg.agent.core.result.AgentResult;
 import com.ooohyg.agent.strategy.ExecutionStrategy;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.util.Objects;
 
@@ -42,7 +43,7 @@ import java.util.Objects;
  * 需要并发调用时，每个线程使用独立实例。
  */
 public class BaseAgent {
-
+    private static final Logger log = LoggerFactory.getLogger(BaseAgent.class);
     private final String name;
     private final ExecutionStrategy strategy;
     private final int maxSteps;
@@ -74,6 +75,9 @@ public class BaseAgent {
             throw new IllegalArgumentException("maxSteps must be positive, got: " + maxSteps);
         }
         this.maxSteps = maxSteps;
+
+        log.debug("BaseAgent[{}] created, strategy={}, maxSteps={}",
+                name, strategy.type(), maxSteps);
     }
 
     /**
@@ -105,10 +109,6 @@ public class BaseAgent {
      * @throws AgentException 技术故障
      */
     public AgentResult run(String userInput) {
-        // ---- 前置校验（在 try 外）----
-        // 状态非法是"调用方误用"，不是"执行中出错"，
-        // 所以抛 IllegalStateException 而不是 AgentException，
-        // 也不进入下面的 catch 分支。
         if (state != AgentState.IDLE) {
             throw new IllegalStateException(
                     "Agent[" + name + "] cannot run from state " + state
@@ -118,31 +118,37 @@ public class BaseAgent {
             throw new IllegalArgumentException("userInput must not be blank");
         }
 
-        // ---- 状态切到 RUNNING ----
         transitionTo(AgentState.RUNNING);
 
-        // ---- 创建执行上下文 ----
-        // ctx 是"环境快照"：执行期间不会改变，策略通过它读取
-        // executionId、userInput、maxSteps。
         ExecutionId executionId = ExecutionId.generate();
         AgentContext ctx = new DefaultAgentContext(executionId, userInput, maxSteps);
 
-        // ---- 委托给策略，并统一处理异常 ----
+        log.info("Agent[{}] run started, executionId={}, inputLength={}",
+                name, executionId, userInput.length());
+
         try {
             AgentResult result = strategy.execute(ctx);
-            // 业务失败也走这里：成功或失败由 result.success() 表达，
-            // 状态统一流转到 FINISHED。ERROR 专门留给技术异常。
             transitionTo(AgentState.FINISHED);
+
+            if (result.success()) {
+                log.info("Agent[{}] run finished successfully, executionId={}",
+                        name, executionId);
+            } else {
+                log.info("Agent[{}] run finished with business failure, executionId={}, reason={}",
+                        name, executionId, result.failureMessage());
+            }
             return result;
+
         } catch (AgentException e) {
-            // 策略已经明确抛出 AgentException：状态转 ERROR，原样重抛。
             transitionTo(AgentState.ERROR);
+            log.error("Agent[{}] run failed with AgentException, executionId={}",
+                    name, executionId, e);
             throw e;
+
         } catch (Exception e) {
-            // 策略抛出未预期的异常（NPE、RuntimeException 等）：
-            // 这属于策略实现的 bug，包装为 AgentException 后重抛，
-            // 保证上层只需要 catch 一种异常类型。
             transitionTo(AgentState.ERROR);
+            log.error("Agent[{}] run failed with unexpected exception, executionId={}",
+                    name, executionId, e);
             throw new AgentException(
                     "Unexpected error during agent execution (name=" + name + ")", e);
         }
@@ -160,10 +166,13 @@ public class BaseAgent {
      */
     private void transitionTo(AgentState next) {
         if (!state.canTransitionTo(next)) {
+            log.error("Agent[{}] illegal state transition attempted: {} -> {}",
+                    name, state, next);
             throw new IllegalStateException(
                     "Illegal state transition for Agent[" + name + "]: "
                             + state + " -> " + next);
         }
+        log.debug("Agent[{}] state transition: {} -> {}", name, state, next);
         this.state = next;
     }
 
