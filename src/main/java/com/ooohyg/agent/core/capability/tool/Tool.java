@@ -73,4 +73,16 @@ public interface Tool {
      * @throws com.ooohyg.agent.core.exception.AgentException 技术故障
      */
     ToolResult execute(String arguments);
+
+    /**
+     * 本工具的能力分类。
+     *
+     * <p>默认 {@link CapabilityKind#READ}。任何有副作用的工具
+     * 都应重写此方法。
+     *
+     * @return 非 null
+     */
+    default CapabilityKind capability() {
+        return CapabilityKind.READ;
+    }
 }

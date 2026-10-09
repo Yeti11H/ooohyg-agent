@@ -48,6 +48,12 @@
                     <skip>false</skip>
                 </configuration>
             </plugin>
+            <!-- surefire 3.5+ 支持 JDK 24 下的 fork 测试运行（3.2.x 会因 URLClassPath 检查失败） -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <version>3.5.2</version>
+            </plugin>
         </plugins>
     </build>
 </project>

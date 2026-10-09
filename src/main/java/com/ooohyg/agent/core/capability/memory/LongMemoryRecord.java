@@ -1,5 +1,7 @@
 package com.ooohyg.agent.core.capability.memory;
 
+import com.ooohyg.agent.core.capability.retrieval.SearchResult;
+
 import java.util.Map;
 import java.util.Objects;
 
@@ -46,7 +48,7 @@ import java.util.Objects;
  *   <li>同一条记忆在不同 query 下的 score 不同，把它绑进记录里
  *       每次 recall 都要重新构造 MemoryRecord，浪费且语义混乱；</li>
  *   <li>检索结果的 score 由
- *       {@link MemorySearchResult} 承载——与 RAG 的
+ *       {@link SearchResult} 承载——与 RAG 的
  *       {@link com.ooohyg.agent.core.capability.retrieval.SearchResult
  *       SearchResult} 对称。</li>
  * </ul>

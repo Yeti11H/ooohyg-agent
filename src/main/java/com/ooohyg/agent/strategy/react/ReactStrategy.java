@@ -2,6 +2,8 @@ package com.ooohyg.agent.strategy.react;
 
 import com.ooohyg.agent.core.capability.llm.LlmClient;
 import com.ooohyg.agent.core.capability.llm.LlmResponse;
+import com.ooohyg.agent.core.capability.tool.Decision;
+import com.ooohyg.agent.core.capability.tool.PermissionDecider;
 import com.ooohyg.agent.core.capability.tool.Tool;
 import com.ooohyg.agent.core.capability.tool.ToolRegistry;
 import com.ooohyg.agent.core.capability.tool.ToolResult;
@@ -19,45 +21,6 @@ import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
 
-/**
- * ReAct 执行策略。
- *
- * <p>ReAct = Reasoning + Acting。策略交替进行"模型思考"和"工具执行"：
- * <pre>
- *   THINKING   把当前消息历史发给模型
- *     ├── 模型给出纯文本  → COMPLETED，返回 AgentResult.success
- *     └── 模型请求工具    → ACTING
- *   ACTING     逐个执行工具（串行）
- *   OBSERVING  把工具结果作为 TOOL 消息追加到历史
- *     └── 回到 THINKING
- * </pre>
- *
- * <p><b>循环次数以"模型调用次数"计。</b>每一步（step）= 一次模型调用，
- * 加上随后的若干次工具执行。达到 {@link AgentContext#maxSteps()} 时
- * 不再开新循环，而是做一次收尾。
- *
- * <p><b>策略可重入。</b>{@code messages} 是 {@link #execute} 方法的局部变量，
- * 不放在实例字段上。同一个 ReactStrategy 实例可以并发服务多个
- * {@code execute} 调用——只要 {@link LlmClient} 和 {@link ToolRegistry}
- * 的实现是线程安全的（那是它们的契约）。
- *
- * <p><b>System prompt 为什么在策略里，而不是 BaseAgent：</b>
- * <ul>
- *   <li>ReAct、Plan、Reflexion 三个策略的 prompt 内容完全不同；</li>
- *   <li>BaseAgent 刻意不 import message 包。它负责状态流转和异常处理，
- *       不参与"怎么和模型对话"；</li>
- *   <li>prompt 必须可定制。所以本类提供两个构造器。</li>
- * </ul>
- *
- * <p><b>模型返回多个 toolCalls 时串行执行。</b>每个 ToolCall 依次查表、
- * 执行、追加一条 TOOL 消息。顺序与 toolCalls 顺序一致。
- *
- * <p><b>工具名不存在的处理：</b>把 {@code "Tool not found: <name>"} 作为
- * 失败的 {@link ToolResult}，转成 TOOL 消息喂回模型，让它改。
- *
- * <p><b>步数耗尽的处理：</b>循环结束后再调一次模型，明确告诉它"步数
- * 已用尽，请基于已有观察给出最终答案"，且不再提供工具。
- */
 public final class ReactStrategy implements ExecutionStrategy {
 
     private static final Logger log = LoggerFactory.getLogger(ReactStrategy.class);
@@ -80,11 +43,31 @@ public final class ReactStrategy implements ExecutionStrategy {
     private final ToolRegistry toolRegistry;
     private final String systemPrompt;
 
+    /** 权限决策器。可以为 null——为 null 时不检查权限。 */
+    private final PermissionDecider permissionDecider;
+
+    /** 最简单的构造器：不带权限检查。 */
     public ReactStrategy(LlmClient llmClient, ToolRegistry toolRegistry) {
-        this(llmClient, toolRegistry, DEFAULT_SYSTEM_PROMPT);
+        this(llmClient, toolRegistry, DEFAULT_SYSTEM_PROMPT, null);
     }
 
+    /** 带自定义 prompt，不带权限检查。 */
     public ReactStrategy(LlmClient llmClient, ToolRegistry toolRegistry, String systemPrompt) {
+        this(llmClient, toolRegistry, systemPrompt, null);
+    }
+
+    /** 带权限检查，用默认 prompt。 */
+    public ReactStrategy(LlmClient llmClient,
+                         ToolRegistry toolRegistry,
+                         PermissionDecider permissionDecider) {
+        this(llmClient, toolRegistry, DEFAULT_SYSTEM_PROMPT, permissionDecider);
+    }
+
+    /** 全参构造器。 */
+    public ReactStrategy(LlmClient llmClient,
+                         ToolRegistry toolRegistry,
+                         String systemPrompt,
+                         PermissionDecider permissionDecider) {
         this.llmClient = Objects.requireNonNull(llmClient, "llmClient must not be null");
         this.toolRegistry = Objects.requireNonNull(toolRegistry, "toolRegistry must not be null");
         Objects.requireNonNull(systemPrompt, "systemPrompt must not be null");
@@ -92,9 +75,11 @@ public final class ReactStrategy implements ExecutionStrategy {
             throw new IllegalArgumentException("systemPrompt must not be blank");
         }
         this.systemPrompt = systemPrompt;
+        this.permissionDecider = permissionDecider;
 
-        log.debug("ReactStrategy created, availableTools={}",
-                toolRegistry.definitions().size());
+        log.debug("ReactStrategy created, availableTools={}, permissionDecider={}",
+                toolRegistry.definitions().size(),
+                permissionDecider != null ? "enabled" : "disabled");
     }
 
     @Override
@@ -150,13 +135,47 @@ public final class ReactStrategy implements ExecutionStrategy {
         return wrapUp(messages);
     }
 
+    /**
+     * 执行一个工具调用——含权限检查。
+     */
     private ToolResult executeTool(ToolCall call) {
+        // ========== 第 1 步：查找工具 ==========
         Optional<Tool> tool = toolRegistry.find(call.name());
         if (tool.isEmpty()) {
             log.debug("Tool not found: {}", call.name());
             return ToolResult.failure("Tool not found: " + call.name());
         }
-        return tool.get().execute(call.arguments());
+        Tool t = tool.get();
+
+        // ========== 第 2 步：权限检查 ==========
+        if (permissionDecider != null) {
+            Decision decision = permissionDecider.decide(
+                    t,                       // 工具
+                    call.arguments(),        // 参数
+                    call.id()                // 工具调用 id
+            );
+
+            switch (decision) {
+                case DENY -> {
+                    log.debug("Tool '{}' denied by permission decider", call.name());
+                    return ToolResult.failure(
+                            "Permission denied: tool '" + call.name()
+                                    + "' is not allowed.");
+                }
+                case REQUIRE_APPROVAL -> {
+                    log.debug("Tool '{}' requires approval", call.name());
+                    return ToolResult.failure(
+                            "Tool '" + call.name() + "' requires user approval. "
+                                    + "Please tell the user this action needs confirmation.");
+                }
+                case ALLOW -> {
+                    // 继续往下执行
+                }
+            }
+        }
+
+        // ========== 第 3 步：执行工具 ==========
+        return t.execute(call.arguments());
     }
 
     private AgentResult wrapUp(List<Message> messages) {

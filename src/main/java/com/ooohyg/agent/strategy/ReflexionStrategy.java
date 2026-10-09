@@ -1,9 +1,9 @@
+package com.ooohyg.agent.strategy;
+
 import com.ooohyg.agent.core.execution.AgentContext;
 import com.ooohyg.agent.core.execution.DefaultAgentContext;
 import com.ooohyg.agent.core.execution.ExecutionId;
 import com.ooohyg.agent.core.result.AgentResult;
-import com.ooohyg.agent.strategy.ExecutionStrategy;
-import com.ooohyg.agent.strategy.StrategyType;
 import com.ooohyg.agent.strategy.reflexion.EvaluationResult;
 import com.ooohyg.agent.strategy.reflexion.Evaluator;
 import org.slf4j.Logger;
