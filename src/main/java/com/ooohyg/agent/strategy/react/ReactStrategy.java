@@ -7,6 +7,7 @@ import com.ooohyg.agent.core.capability.tool.PermissionDecider;
 import com.ooohyg.agent.core.capability.tool.Tool;
 import com.ooohyg.agent.core.capability.tool.ToolRegistry;
 import com.ooohyg.agent.core.capability.tool.ToolResult;
+import com.ooohyg.agent.core.exception.AgentException;
 import com.ooohyg.agent.core.execution.AgentContext;
 import com.ooohyg.agent.core.message.Message;
 import com.ooohyg.agent.core.message.ToolCall;
@@ -27,7 +28,6 @@ public final class ReactStrategy implements ExecutionStrategy {
 
     private static final String DEFAULT_SYSTEM_PROMPT = """
             你是一个使用 ReAct（思考-行动-观察）模式的智能体。
-
             工作方式：
             - 需要外部信息或操作时，调用合适的工具
             - 收到工具返回后，基于真实结果继续推理，不要臆测
@@ -42,32 +42,21 @@ public final class ReactStrategy implements ExecutionStrategy {
     private final LlmClient llmClient;
     private final ToolRegistry toolRegistry;
     private final String systemPrompt;
-
-    /** 权限决策器。可以为 null——为 null 时不检查权限。 */
     private final PermissionDecider permissionDecider;
 
-    /** 最简单的构造器：不带权限检查。 */
     public ReactStrategy(LlmClient llmClient, ToolRegistry toolRegistry) {
         this(llmClient, toolRegistry, DEFAULT_SYSTEM_PROMPT, null);
     }
 
-    /** 带自定义 prompt，不带权限检查。 */
     public ReactStrategy(LlmClient llmClient, ToolRegistry toolRegistry, String systemPrompt) {
         this(llmClient, toolRegistry, systemPrompt, null);
     }
 
-    /** 带权限检查，用默认 prompt。 */
-    public ReactStrategy(LlmClient llmClient,
-                         ToolRegistry toolRegistry,
-                         PermissionDecider permissionDecider) {
+    public ReactStrategy(LlmClient llmClient, ToolRegistry toolRegistry, PermissionDecider permissionDecider) {
         this(llmClient, toolRegistry, DEFAULT_SYSTEM_PROMPT, permissionDecider);
     }
 
-    /** 全参构造器。 */
-    public ReactStrategy(LlmClient llmClient,
-                         ToolRegistry toolRegistry,
-                         String systemPrompt,
-                         PermissionDecider permissionDecider) {
+    public ReactStrategy(LlmClient llmClient, ToolRegistry toolRegistry, String systemPrompt, PermissionDecider permissionDecider) {
         this.llmClient = Objects.requireNonNull(llmClient, "llmClient must not be null");
         this.toolRegistry = Objects.requireNonNull(toolRegistry, "toolRegistry must not be null");
         Objects.requireNonNull(systemPrompt, "systemPrompt must not be null");
@@ -76,10 +65,6 @@ public final class ReactStrategy implements ExecutionStrategy {
         }
         this.systemPrompt = systemPrompt;
         this.permissionDecider = permissionDecider;
-
-        log.debug("ReactStrategy created, availableTools={}, permissionDecider={}",
-                toolRegistry.definitions().size(),
-                permissionDecider != null ? "enabled" : "disabled");
     }
 
     @Override
@@ -87,111 +72,109 @@ public final class ReactStrategy implements ExecutionStrategy {
         return StrategyType.REACT;
     }
 
+    // =========================================================
+    // 改动一：引入显式状态管理对象
+    // =========================================================
+    private static class ReactState {
+        final List<Message> messages;
+        int step;
+
+        ReactState(String systemPrompt, String userInput) {
+            this.messages = new ArrayList<>();
+            this.messages.add(Message.system(systemPrompt));
+            this.messages.add(Message.user(userInput));
+            this.step = 0;
+        }
+    }
+
     @Override
     public AgentResult execute(AgentContext ctx) {
         Objects.requireNonNull(ctx, "ctx must not be null");
 
-        List<Message> messages = new ArrayList<>();
-        messages.add(Message.system(systemPrompt));
-        messages.add(Message.user(ctx.userInput()));
+        // 初始化状态
+        ReactState state = new ReactState(systemPrompt, ctx.userInput());
 
-        log.debug("ReAct execution started, executionId={}, maxSteps={}",
-                ctx.executionId(), ctx.maxSteps());
+        log.debug("ReAct execution started, executionId={}, maxSteps={}", ctx.executionId(), ctx.maxSteps());
 
-        for (int step = 0; step < ctx.maxSteps(); step++) {
-            log.debug("ReAct step {}/{}, messages={}",
-                    step + 1, ctx.maxSteps(), messages.size());
+        for (; state.step < ctx.maxSteps(); state.step++) {
+            log.debug("ReAct step {}/{}, messages={}", state.step + 1, ctx.maxSteps(), state.messages.size());
 
-            LlmResponse response = llmClient.chat(messages, toolRegistry.definitions());
+            // 1. 调模型
+            LlmResponse response = llmClient.chat(state.messages, toolRegistry.definitions());
 
+            // 2. 判断模型意图
             if (response.hasToolCalls()) {
-                log.debug("ReAct step {}: model requested {} tool call(s)",
-                        step + 1, response.toolCalls().size());
-                messages.add(Message.assistantWithToolCalls(
-                        response.content(), response.toolCalls()));
+                log.debug("ReAct step {}: model requested {} tool call(s)", state.step + 1, response.toolCalls().size());
+                state.messages.add(Message.assistantWithToolCalls(response.content(), response.toolCalls()));
             } else {
-                log.debug("ReAct step {}: model returned final answer", step + 1);
-                messages.add(Message.assistant(response.content()));
+                log.debug("ReAct step {}: model returned final answer", state.step + 1);
                 return AgentResult.success(response.content(), StrategyType.REACT);
             }
 
+            // 3. 执行工具（带强制孤儿修复）
             for (ToolCall call : response.toolCalls()) {
-                log.debug("Executing tool: name={}, toolCallId={}",
-                        call.name(), call.id());
-                ToolResult result = executeTool(call);
-                log.debug("Tool {} completed: success={}", call.name(), result.success());
+                try {
+                    ToolResult result = executeTool(call);
+                    String content = result.success() ? result.output() : "Error: " + result.errorMessage();
+                    state.messages.add(Message.tool(call.id(), content));
 
-                String content = result.success()
-                        ? result.output()
-                        : "Error: " + result.errorMessage();
+                } catch (Exception e) {
+                    // =========================================================
+                    // 改动二：强制"孤儿工具"修复
+                    // 如果工具执行抛出异常，我们必须先补一个假的 TOOL 消息，
+                    // 保持消息配对完整，然后再把异常抛给上层。
+                    // =========================================================
+                    log.error("Tool execution failed with exception, synthesizing fake tool result", e);
 
-                messages.add(Message.tool(call.id(), content));
+                    // 塞一条占位消息（注意：content 不能为空白字符串，否则会触发 Message 类的校验异常）
+                    state.messages.add(Message.tool(call.id(), "[System Error] Tool execution aborted."));
+
+                    // 包装并向上抛出，由 BaseAgent 接管将状态转为 ERROR
+                    if (e instanceof AgentException) {
+                        throw (AgentException) e;
+                    } else {
+                        throw new AgentException("Unexpected error during tool execution", e);
+                    }
+                }
             }
         }
 
-        log.warn("ReAct reached maxSteps={} without final answer, executionId={}, "
-                        + "starting wrap-up call",
-                ctx.maxSteps(), ctx.executionId());
-        return wrapUp(messages);
+        log.warn("ReAct reached maxSteps={} without final answer, starting wrap-up call", ctx.maxSteps());
+        return wrapUp(state.messages);
     }
 
-    /**
-     * 执行一个工具调用——含权限检查。
-     */
     private ToolResult executeTool(ToolCall call) {
-        // ========== 第 1 步：查找工具 ==========
         Optional<Tool> tool = toolRegistry.find(call.name());
         if (tool.isEmpty()) {
-            log.debug("Tool not found: {}", call.name());
             return ToolResult.failure("Tool not found: " + call.name());
         }
         Tool t = tool.get();
 
-        // ========== 第 2 步：权限检查 ==========
+        // 权限检查
         if (permissionDecider != null) {
-            Decision decision = permissionDecider.decide(
-                    t,                       // 工具
-                    call.arguments(),        // 参数
-                    call.id()                // 工具调用 id
-            );
-
+            Decision decision = permissionDecider.decide(t, call.arguments(), call.id());
             switch (decision) {
                 case DENY -> {
-                    log.debug("Tool '{}' denied by permission decider", call.name());
-                    return ToolResult.failure(
-                            "Permission denied: tool '" + call.name()
-                                    + "' is not allowed.");
+                    return ToolResult.failure("Permission denied for tool '" + call.name() + "'.");
                 }
                 case REQUIRE_APPROVAL -> {
-                    log.debug("Tool '{}' requires approval", call.name());
-                    return ToolResult.failure(
-                            "Tool '" + call.name() + "' requires user approval. "
-                                    + "Please tell the user this action needs confirmation.");
+                    return ToolResult.failure("Tool '" + call.name() + "' requires approval.");
                 }
-                case ALLOW -> {
-                    // 继续往下执行
-                }
+                case ALLOW -> { /* 继续执行 */ }
             }
         }
 
-        // ========== 第 3 步：执行工具 ==========
         return t.execute(call.arguments());
     }
 
     private AgentResult wrapUp(List<Message> messages) {
+        // 注意：这里为了不污染原始 state，最好拷贝一份或者直接追加
         messages.add(Message.user(WRAP_UP_PROMPT));
-
         LlmResponse response = llmClient.chat(messages, null);
 
         if (response.isPlainAnswer()) {
-            log.debug("ReAct wrap-up call returned final answer");
             return AgentResult.success(response.content(), StrategyType.REACT);
         }
-
-        log.warn("ReAct wrap-up call also returned a tool call, treating as failure");
-        return AgentResult.failure(
-                "Reached max steps without a final answer; "
-                        + "wrap-up call also returned a tool call.",
-                StrategyType.REACT);
+        return AgentResult.failure("Reached max steps without a final answer.", StrategyType.REACT);
     }
 }
