@@ -1,11 +1,15 @@
 package com.ooohyg.agent.workflow;
 
+import com.ooohyg.agent.core.capability.llm.LlmResponse;
+import com.ooohyg.agent.core.message.MessageRole;
+import com.ooohyg.agent.core.message.ToolCall;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.List;
 
 import static com.ooohyg.agent.workflow.RunStore.*;
 import static org.junit.jupiter.api.Assertions.*;
@@ -40,7 +44,7 @@ class DevelopmentWorkflowTest {
         assertEquals(2, rounds.size());
         assertTrue(Files.readString(store.dir.resolve("checks-0/old-sort.out")).contains("passed"));
         assertTrue(Files.readString(store.dir.resolve("checks-0/AC-02-above.err")).contains("AssertionError"));
-        for (String check : new String[]{"AC-01", "AC-02-below", "AC-02-at", "AC-02-above", "AC-03", "AC-04"}) {
+        for (String check : new String[]{"AC-01", "AC-02-below", "AC-02-at", "AC-02-above", "AC-02-nonpositive", "AC-03", "AC-04"}) {
             assertTrue(Files.readString(store.dir.resolve("checks-1/" + check + ".out")).contains("passed"));
         }
         assertTrue(Files.readString(store.dir.resolve("acceptance.md")).contains("Acceptance incomplete"));
@@ -69,6 +73,69 @@ class DevelopmentWorkflowTest {
         assertEquals("missing", RepositoryWiki.find(home, "different-repository", secondSource, OrderFixture.HISTORY).status());
         Files.writeString(secondSource.resolve(OrderFixture.PROVENANCE), "Changed module rules");
         assertEquals("stale_source", RepositoryWiki.find(home, OrderFixture.ID, secondSource, OrderFixture.HISTORY).status());
+    }
+
+    @Test
+    void modelSuppliedExpressionProducesTheCheckedPatchAndCanRepairIt() throws Exception {
+        var store = RunStore.create(home);
+        var workflow = new DevelopmentWorkflow(home, store, name -> (messages, tools) -> {
+            boolean repair = messages.stream().filter(m -> m.role() == MessageRole.USER)
+                    .anyMatch(m -> m.content().contains("AC-02-above failed"));
+            long calls = messages.stream().filter(m -> m.role() == MessageRole.TOOL).count();
+            if (calls == 0) return toolCall("read_order_query", "{}");
+            if (calls == 1) return toolCall("edit_order_query", repair
+                    ? """
+                    {"defaultLimit":20,"limitExpression":"Math.min(Math.max(limit, 0), 50)"}
+                    """
+                    : """
+                    {"defaultLimit":20,"limitExpression":"Math.max(limit, 0)"}
+                    """);
+            return new LlmResponse("Done", null, "stop");
+        });
+        workflow.initialize(Mode.FULL, "Paginate the order history", OrderFixture.HISTORY, false, false, "test-model");
+        store.locked(state -> workflow.answer(state, 50));
+        confirm(workflow, store, Phase.INTENT);
+        confirm(workflow, store, Phase.SPEC);
+        confirm(workflow, store, Phase.PLAN);
+        store.locked(workflow::execute);
+
+        var rounds = WorkflowFiles.JSON.readTree(store.dir.resolve("checks.json").toFile());
+        assertEquals(2, rounds.size());
+        assertTrue(Files.readString(store.dir.resolve("patch-0.diff")).contains("Math.max(limit, 0)"));
+        assertTrue(Files.readString(store.dir.resolve("checks-0/AC-02-above.err")).contains("AssertionError"));
+        Path candidate = store.dir.resolve("candidate-1").resolve(OrderFixture.SOURCE);
+        assertEquals(Files.readString(candidate), Files.readString(store.dir.resolve("checks-1/OrderQueries.java")));
+        String patch = Files.readString(store.dir.resolve("patch.diff"));
+        assertTrue(patch.contains("+        return page(ids, limit == null ? 20 : Math.min(Math.max(limit, 0), 50));"));
+        assertTrue(patch.contains("@@") && patch.contains("history(List<Integer>"));
+        for (var check : rounds.get(1).path("checks").path("assertions")) {
+            assertEquals("passed", check.path("status").asText(), check.path("id").asText());
+        }
+        assertEquals("passed", rounds.get(1).path("checks").path("compilation").path("status").asText());
+    }
+
+    @Test
+    void editRejectsUnapprovedArgumentsAndExpressionsBeforeWriting() throws Exception {
+        var store = RunStore.create(home);
+        OrderFixture.initialize(store.dir, OrderFixture.LIST);
+        Path source = store.dir.resolve("source");
+        var edit = new OrderFixture.ScopedEdit(source, OrderFixture.LIST);
+        Path target = source.resolve(OrderFixture.SOURCE);
+        String original = Files.readString(target);
+        for (String invalid : List.of(
+                "null",
+                "{\"defaultLimit\":20,\"defaultLimit\":10,\"limitExpression\":\"limit\"}",
+                "{\"defaultLimit\":20,\"limitExpression\":\"limit\",\"scope\":\"export\"}",
+                "{\"defaultLimit\":20,\"limitExpression\":\"limit\"} {}",
+                "{\"defaultLimit\":20,\"limitExpression\":\"limit) + 1\"}",
+                "{\"defaultLimit\":20,\"limitExpression\":\"Math.abs(limit)\"}",
+                "{\"defaultLimit\":20,\"limitExpression\":\"limit; return 0\"}")) {
+            assertFalse(edit.execute(invalid).success(), invalid);
+            assertEquals(original, Files.readString(target));
+        }
+        Files.writeString(target, original + "\n");
+        assertFalse(edit.execute("{\"defaultLimit\":20,\"limitExpression\":\"Math.max(limit, 0)\"}").success());
+        assertEquals(original + "\n", Files.readString(target));
     }
 
     @Test
@@ -109,6 +176,10 @@ class DevelopmentWorkflowTest {
 
     private static String review(Path report, int exit, String candidate) throws IOException {
         return DshReviewRunner.parse(report, exit, "base", candidate, "candidate source").status();
+    }
+
+    private static LlmResponse toolCall(String name, String args) {
+        return new LlmResponse(null, List.of(new ToolCall(name + "-1", name, args)), "tool_calls");
     }
 
     private static void confirm(DevelopmentWorkflow workflow, RunStore store, Phase phase) throws Exception {

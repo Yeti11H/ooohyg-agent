@@ -39,7 +39,7 @@ final class DshReviewRunner {
         }
         command.addAll(List.of("--cwd", snapshot.toString(), "--target", base,
                 "--requirement", "Paginate " + scope + ": default 20; clamp above " + cap
-                        + "; preserve ascending sort and do not change exports.",
+                        + "; return no orders for non-positive limits; preserve ascending sort and do not change exports.",
                 "--business-rules", "Bulk export remains unpaginated",
                 "--output-json", report.toString(), "--exit-code", "--fail-on-needs-check"));
         try {

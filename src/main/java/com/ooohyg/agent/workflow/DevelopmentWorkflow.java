@@ -17,6 +17,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.function.Function;
 
 import static com.ooohyg.agent.workflow.RunStore.Mode;
 import static com.ooohyg.agent.workflow.RunStore.Phase;
@@ -29,10 +30,16 @@ final class DevelopmentWorkflow {
 
     private final Path home;
     private final RunStore store;
+    private final Function<String, LlmClient> modelClient;
 
     DevelopmentWorkflow(Path home, RunStore store) {
+        this(home, store, CompatibleChatClient::new);
+    }
+
+    DevelopmentWorkflow(Path home, RunStore store, Function<String, LlmClient> modelClient) {
         this.home = home;
         this.store = store;
+        this.modelClient = modelClient;
     }
 
     Draft initialize(Mode mode, String request, String scope, boolean wiki, boolean dsh, String model)
@@ -101,7 +108,7 @@ final class DevelopmentWorkflow {
     private Draft plan(State state) throws IOException {
         List<PlanStep> steps = List.of(PlanStep.pending(0, "Update only " + state.scope() + " in "
                 + OrderFixture.SOURCE + "; implement AC-01, AC-02, AC-03, preserve AC-04. "
-                + "Harness runs checked default, below/at/above limit, sorting and unchanged export."));
+                + "Harness checks default, below/at/above limit, non-positive limits, sorting and unchanged export."));
         var planned = state.next(state.phase(), state.cap(), steps, state.approvals());
         return saveDraft(planned, Phase.PLAN, "# Plan\n\nRequest: " + state.request()
                 + "\n\nPinned commit: `" + state.commit() + "`\n\n" + acceptance(state)
@@ -132,7 +139,7 @@ final class DevelopmentWorkflow {
     private static String acceptance(State state) {
         return """
                 - AC-01: With no limit, return 20 orders when enough are available.
-                - AC-02: Honor requested limits below and at %d; clamp higher limits to %d.
+                - AC-02: Honor positive limits below and at %d; clamp higher limits to %d. Zero and negative limits return no orders.
                 - AC-03: Preserve ascending ID order.
                 - AC-04: Bulk exports remain unchanged.
                 """.formatted(state.cap(), state.cap());
@@ -162,24 +169,30 @@ final class DevelopmentWorkflow {
                         RepositoryWorkspace.scopedFile(source(), OrderFixture.SOURCE)))) {
             throw new IOException("Baseline workspace changed");
         }
-        LlmClient remote = state.model().equals("scripted") ? null : new CompatibleChatClient(state.model());
+        var edit = new OrderFixture.ScopedEdit(source(), state.scope());
+        LlmClient remote = state.model().equals("scripted") ? null : modelClient.apply(state.model());
         store.save(state.next(Phase.EXECUTING, state.cap(), state.steps(), state.approvals()));
         List<Round> rounds = new ArrayList<>();
         String repairReason = null;
         for (int round = 0; round <= 2; round++) {
             boolean knownBad = round == 0 && remote == null && state.mode() == Mode.FULL;
-            var result = strategy(state, remote, knownBad).executePlan(new DefaultAgentContext(
+            var result = strategy(state, remote, knownBad, edit).executePlan(new DefaultAgentContext(
                             ExecutionId.generate(), acceptance(state)
                                     + (repairReason == null ? "" : "\nRepair only: " + repairReason), 8),
                     round == 0 ? state.steps() : List.of(PlanStep.pending(0, repairReason)));
             if (!result.success()) throw new IOException("Execution strategy failed; inspect retained source");
+            edit.requireExpected(edit.target());
+            RepositoryWorkspace.git(source(), gitLog, "status", "--porcelain=v1", "--untracked-files=all");
+            if (!Files.readAllLines(gitLog).equals(List.of(" M " + OrderFixture.SOURCE))) {
+                throw new IOException("Expected a change only to the approved source file; inspect retained source");
+            }
             Path patch = store.dir.resolve("patch-" + round + ".diff");
             RepositoryWorkspace.git(source(), patch, "diff", "--binary", "HEAD", "--");
             byte[] bytes = Files.readAllBytes(patch);
             if (bytes.length == 0) throw new IOException("No patch produced; inspect retained source");
             String hash = WorkflowFiles.hash(bytes);
             if (!rounds.isEmpty() && hash.equals(rounds.get(rounds.size() - 1).patchSha256())) break;
-            var check = OrderFixture.checks(store.dir, state.scope(), state.cap(), round);
+            var check = OrderFixture.checks(store.dir, state.scope(), state.cap(), round, edit);
             Path snapshot = store.dir.resolve("candidate-" + round);
             RepositoryWorkspace.git(source(), gitLog, "-c", "protocol.file.allow=always",
                     "clone", "--local", "--no-hardlinks", "--no-checkout",
@@ -200,7 +213,8 @@ final class DevelopmentWorkflow {
             WorkflowFiles.json(store.dir.resolve("checks.json"), rounds);
             AcceptanceReport.write(store.dir, state, rounds);
             // The fixture has one verified repair: restore the confirmed maximum after a failed above-cap check.
-            if (check.assertions().stream().noneMatch(c -> c.id().equals("AC-02-above") && c.status().equals("failed"))
+            if (state.mode() == Mode.LIGHT
+                    || check.assertions().stream().noneMatch(c -> c.id().equals("AC-02-above") && c.status().equals("failed"))
                     || check.assertions().stream().anyMatch(c -> !c.id().equals("AC-02-above") && !c.status().equals("passed"))) {
                 break;
             }
@@ -216,17 +230,17 @@ final class DevelopmentWorkflow {
         store.save(state.next(Phase.FINISHED, state.cap(), state.steps(), state.approvals()));
     }
 
-    private PlanAndExecuteStrategy strategy(State state, LlmClient remote, boolean knownBad) {
+    private PlanAndExecuteStrategy strategy(State state, LlmClient remote, boolean knownBad, OrderFixture.ScopedEdit edit) {
         LlmClient worker = remote == null ? (messages, tools) -> {
             long calls = messages.stream().filter(m -> m.role() == MessageRole.TOOL).count();
             if (calls == 0) return call("read_order_query", "{}");
-            if (calls == 1) return call("edit_order_query", "{\"implementation\":\""
-                    + (knownBad ? "uncapped" : "capped") + "\"}");
+            if (calls == 1) return call("edit_order_query", "{\"defaultLimit\":20,\"limitExpression\":\""
+                    + (knownBad ? "Math.max(0, limit)" : "Math.max(0, Math.min(" + state.cap() + ", limit))") + "\"}");
             return new LlmResponse("Fixture tool finished; acceptance is determined by actual checks.", null, "stop");
         } : remote;
-        var react = new ReactStrategy(worker, new DefaultToolRegistry(List.of(OrderFixture.readTool(source()),
-                OrderFixture.editTool(source(), state.scope(), state.cap(), knownBad))),
-                "Use the approved scoped tools to implement the task. The harness checks actual output independently.",
+        var react = new ReactStrategy(worker, new DefaultToolRegistry(List.of(OrderFixture.readTool(source()), edit)),
+                "Read the approved source, then submit the integer null default and the non-null limit expression "
+                        + "through edit_order_query. The harness checks actual output independently.",
                 (tool, args, callId) -> Decision.ALLOW);
         return new PlanAndExecuteStrategy((m, t) -> { throw new IllegalStateException("Approved run cannot replan"); },
                 text -> List.of(), react);

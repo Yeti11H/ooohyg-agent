@@ -1,5 +1,7 @@
 package com.ooohyg.agent.workflow;
 
+import com.fasterxml.jackson.core.JsonParser;
+import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.ooohyg.agent.core.capability.tool.CapabilityKind;
 import com.ooohyg.agent.core.capability.tool.Tool;
@@ -22,7 +24,6 @@ final class OrderFixture {
     static final String EXPORT = "export";
     private static final String CHECKS = "OrderAcceptance.java";
     private static final String BASELINE = "return sorted(ids);";
-    private static final String UNCAPPED = "return page(ids, limit == null ? 20 : Math.max(0, limit));";
     private static final String SOURCE_TEMPLATE = """
             package demo.orders;
             import java.util.List;
@@ -71,6 +72,7 @@ final class OrderFixture {
                         case "below" -> require("AC-02-below", query.apply(cap - 1).size() == cap - 1);
                         case "at" -> require("AC-02-at", query.apply(cap).size() == cap);
                         case "above" -> require("AC-02-above", query.apply(cap + 1).size() == cap);
+                        case "nonpositive" -> require("AC-02-nonpositive", query.apply(0).isEmpty() && query.apply(-1).isEmpty());
                         case "sort" -> require("AC-03", query.apply(3).equals(List.of(1,2,3)));
                         case "export" -> require("AC-04", OrderQueries.export(ids).size() == 80);
                         default -> throw new IllegalArgumentException(limit);
@@ -144,58 +146,84 @@ final class OrderFixture {
         };
     }
 
-    static Tool editTool(Path root, String scope, int cap, boolean allowKnownBadPatch) {
-        return new Tool() {
-            public ToolDefinition definition() {
-                return new ToolDefinition("edit_order_query",
-                        "Apply the supported pagination edit to the approved endpoint. Use capped for the approved maximum.",
-                        """
-                        {"type":"object","properties":{"implementation":{"type":"string","enum":["capped","uncapped"]}},
-                         "required":["implementation"],"additionalProperties":false}
-                        """);
-            }
+    static final class ScopedEdit implements Tool {
+        private final Path root;
+        private final String scope;
+        private String expected;
 
-            @Override
-            public CapabilityKind capability() { return CapabilityKind.WRITE; }
+        ScopedEdit(Path root, String scope) throws IOException {
+            if (!List.of(LIST, HISTORY).contains(scope)) throw new IOException("Only interactive queries can be edited");
+            this.root = root;
+            this.scope = scope;
+            this.expected = baseline(scope);
+            requireExpected(target());
+        }
 
-            public ToolResult execute(String arguments) {
-                try {
-                    JsonNode args = WorkflowFiles.JSON.readTree(arguments);
-                    String variant = args.path("implementation").asText();
-                    if (args == null || !args.isObject() || args.size() != 1
-                            || !(variant.equals("capped") || (allowKnownBadPatch && variant.equals("uncapped")))) {
-                        return ToolResult.failure("Unsupported implementation");
-                    }
-                    Path target = RepositoryWorkspace.scopedFile(root, SOURCE);
-                    requireTrusted(root, scope, cap);
-                    WorkflowFiles.write(target, candidateText(scope, variant.equals("capped") ? capped(cap) : UNCAPPED));
-                    return ToolResult.success("Updated the approved endpoint in " + SOURCE);
-                } catch (IOException | IllegalArgumentException e) {
-                    return ToolResult.failure("Fixture edit rejected: " + e.getMessage());
+        @Override
+        public ToolDefinition definition() {
+            return new ToolDefinition("edit_order_query",
+                    "Edit only the approved method. Supply the null default and a Java integer expression for a "
+                            + "non-null limit. Allowed: limit, non-negative int literals, parentheses, Math.min and Math.max.",
+                    """
+                    {"type":"object","properties":{"defaultLimit":{"type":"integer","minimum":0,"maximum":2147483647},
+                     "limitExpression":{"type":"string","maxLength":160}},
+                     "required":["defaultLimit","limitExpression"],"additionalProperties":false}
+                    """);
+        }
+
+        @Override
+        public CapabilityKind capability() { return CapabilityKind.WRITE; }
+
+        @Override
+        public ToolResult execute(String arguments) {
+            try {
+                if (arguments == null || arguments.length() > 1024) return ToolResult.failure("Invalid edit arguments");
+                JsonNode args = WorkflowFiles.JSON.reader()
+                        .with(DeserializationFeature.FAIL_ON_TRAILING_TOKENS)
+                        .with(JsonParser.Feature.STRICT_DUPLICATE_DETECTION).readTree(arguments);
+                if (args == null || !args.isObject() || args.size() != 2
+                        || !args.path("defaultLimit").isIntegralNumber()
+                        || !args.path("defaultLimit").canConvertToInt()
+                        || args.path("defaultLimit").intValue() < 0
+                        || !args.path("limitExpression").isTextual()) {
+                    return ToolResult.failure("Expected a non-negative defaultLimit and a limitExpression");
                 }
+                String expression = PaginationExpression.render(args.path("limitExpression").textValue());
+                String candidate = candidateText(scope,
+                        "return page(ids, limit == null ? " + args.path("defaultLimit").intValue() + " : " + expression + ");");
+                Path target = target();
+                requireExpected(target);
+                WorkflowFiles.write(target, candidate);
+                expected = candidate;
+                return ToolResult.success("Updated the approved endpoint in " + SOURCE);
+            } catch (IOException e) {
+                return ToolResult.failure("Invalid edit JSON or fixture source changed outside the approved edit");
+            } catch (IllegalArgumentException e) {
+                return ToolResult.failure(e.getMessage());
             }
-        };
-    }
+        }
 
-    static void requireTrusted(Path root, String scope, int cap) throws IOException {
-        String actual = WorkflowFiles.hash(RepositoryWorkspace.scopedFile(root, SOURCE));
-        if (!(baselineHash(scope).equals(actual)
-                || hashText(candidateText(scope, capped(cap))).equals(actual)
-                || hashText(candidateText(scope, UNCAPPED)).equals(actual))) {
-            throw new IOException("Fixture source has changed outside approved templates");
+        Path target() throws IOException {
+            return RepositoryWorkspace.scopedFile(root, SOURCE);
+        }
+
+        void requireExpected(Path source) throws IOException {
+            if (!hashText(expected).equals(WorkflowFiles.hash(source))) {
+                throw new IOException("Fixture source differs from the approved baseline or last validated edit");
+            }
         }
     }
 
-    static Checks checks(Path run, String scope, int cap, int round) throws IOException, InterruptedException {
-        Path root = run.resolve("source");
-        requireTrusted(root, scope, cap);
+    static Checks checks(Path run, String scope, int cap, int round, ScopedEdit edit) throws IOException, InterruptedException {
+        Path target = edit.target();
+        edit.requireExpected(target);
         Path evidence = Files.createDirectory(run.resolve("checks-" + round));
         Path classes = Files.createDirectory(evidence.resolve("classes"));
         Path independentChecks = evidence.resolve(CHECKS);
         WorkflowFiles.write(independentChecks, ACCEPTANCE);
         Path checkedSource = evidence.resolve("OrderQueries.java");
-        Files.copy(RepositoryWorkspace.scopedFile(root, SOURCE), checkedSource);
-        requireTrustedCopy(checkedSource, scope, cap);
+        Files.copy(target, checkedSource);
+        edit.requireExpected(checkedSource);
         Check compile = check(evidence, "compile", "Compile the captured fixture and independent checks",
                 List.of(executable("javac"), "-encoding", "UTF-8", "-d", classes.toString(),
                         checkedSource.toString(), independentChecks.toString()));
@@ -204,27 +232,20 @@ final class OrderFixture {
         assertions.add(check(evidence, "old-sort", "Existing sort check with four orders",
                 List.of(executable("java"), "-cp", classes.toString(), "OrderAcceptance", "old")));
         Map<String, String> ids = Map.of("default", "AC-01", "below", "AC-02-below", "at", "AC-02-at",
-                "above", "AC-02-above", "sort", "AC-03", "export", "AC-04");
-        for (String test : List.of("default", "below", "at", "above", "sort", "export")) {
+                "above", "AC-02-above", "nonpositive", "AC-02-nonpositive", "sort", "AC-03", "export", "AC-04");
+        for (String test : List.of("default", "below", "at", "above", "nonpositive", "sort", "export")) {
             assertions.add(check(evidence, ids.get(test), switch (test) {
                 case "default" -> "Missing limit returns 20";
                 case "below" -> "Limit " + (cap - 1) + " returns " + (cap - 1);
                 case "at" -> "Limit " + cap + " returns " + cap;
                 case "above" -> "Limit " + (cap + 1) + " returns " + cap;
+                case "nonpositive" -> "Zero and negative limits return no orders";
                 case "sort" -> "Return the first three IDs in ascending order";
                 default -> "Bulk export still returns all 80 orders";
             }, List.of(executable("java"), "-cp", classes.toString(), "OrderAcceptance", scope,
                     Integer.toString(cap), test)));
         }
         return new Checks(compile, List.copyOf(assertions));
-    }
-
-    private static void requireTrustedCopy(Path source, String scope, int cap) throws IOException {
-        String actual = WorkflowFiles.hash(source);
-        if (!(baselineHash(scope).equals(actual) || hashText(candidateText(scope, capped(cap))).equals(actual)
-                || hashText(candidateText(scope, UNCAPPED)).equals(actual))) {
-            throw new IOException("Captured fixture differs from approved templates");
-        }
     }
 
     private static String executable(String name) {

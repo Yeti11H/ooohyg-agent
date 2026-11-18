@@ -54,8 +54,9 @@ java -jar $jar workflow confirm $run $token
 java -jar $jar workflow execute $run
 ```
 
-完整模式的第一个补丁刻意漏掉上限：旧排序检查通过，但请求 51 条的检查失败；返修后重新编译和验证
-默认 20 条、请求 49 / 50 / 51 条、顺序和导出。`patch.diff` 是最终补丁；`checks.json` 保存命令、退出码和逐轮结果；
+离线完整模式的第一个补丁刻意漏掉上限：旧排序检查通过，但请求 51 条的检查失败；返修后重新编译和验证
+默认 20 条、请求 49 / 50 / 51 条、非正数、顺序和导出。轻量模式记录检查结果，不自动返修。
+`patch.diff` 是最终补丁；`checks.json` 保存命令、退出码和逐轮结果；
 `acceptance.md` 单独报告已验证行为、审查状态和待人工处理项。无 DSH 审查时，完整模式的报告会显示
 `Acceptance incomplete`。中断后的再次执行会记录待检查状态，保留现有文件，不重复写入；检查后可启动新任务。
 默认产物目录为 `.agent-workflow/`，也可用 `WORKFLOW_HOME` 指定。
@@ -74,13 +75,15 @@ java -jar $jar workflow execute $run
 可选外部服务需要显式开启：
 
 - 任务创建时加 `--model=NAME`，并在本机设置 `WORKFLOW_CHAT_URL`（完整 HTTPS Chat Completions 地址）
-  和 `WORKFLOW_CHAT_KEY`。模型可调用内置样例的受限读写工具；工作流仍采用模板生成 Intent、Spec、Plan。
+  和 `WORKFLOW_CHAT_KEY`。模型读取内置样例后，可提交默认页大小与分页表达式来修改获批方法。
+  表达式只允许 `limit`、非负整数、括号和 `Math.min` / `Math.max`；后端解析后生成源码，
+  独立编译和验收才判断行为是否正确。工作流仍采用模板生成 Intent、Spec、Plan。
 - 任务创建时加 `--dsh`。配置 `DEEPSEEK_API_KEY`；Windows 上同时用 `WORKFLOW_DSH_SCRIPT` 指向本机可信的
   DSH CLI `.mjs` 入口，其他系统可用 PATH 上的 `dsh-review`。每轮审查使用已提交的独立候选快照。
   审查报告或快照不匹配时标为未完成；只有独立检查确认的已知边界问题才自动返修，其他发现由人工判断。
 
-模型服务和 DSH 都是可选集成；无需凭据即可重跑离线样例。工作流回归包括审批失效、断点保护、失败后返修、
-Wiki 适用范围及 DSH 报告校验：
+模型服务和 DSH 都是可选集成；无需凭据即可重跑离线样例。工作流回归包括审批失效、断点保护、拒绝越界编辑、
+模型表达式生成补丁、失败后返修、Wiki 适用范围及 DSH 报告校验：
 
 ```powershell
 mvn '-Dtest=DevelopmentWorkflowTest' test
