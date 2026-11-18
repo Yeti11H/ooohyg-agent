@@ -133,6 +133,16 @@ public final class PlanAndExecuteStrategy implements ExecutionStrategy {
         log.info("Plan generated: {} step(s), executionId={}",
                 steps.size(), ctx.executionId());
 
+        return executePlan(ctx, steps);
+    }
+
+    /** Execute approved steps without calling the planning model again. */
+    public AgentResult executePlan(AgentContext ctx, List<PlanStep> approvedSteps) {
+        Objects.requireNonNull(ctx, "ctx must not be null");
+        List<PlanStep> steps = List.copyOf(approvedSteps);
+        if (steps.isEmpty()) {
+            return AgentResult.failure("Approved plan is empty.", StrategyType.PLAN_AND_EXECUTE);
+        }
         int totalBudget = ctx.maxSteps();
         int remainingBudget = totalBudget - 1;
         if (steps.size() > remainingBudget) {
@@ -176,7 +186,7 @@ public final class PlanAndExecuteStrategy implements ExecutionStrategy {
         return AgentResult.success(lastOutput, StrategyType.PLAN_AND_EXECUTE);
     }
 
-    private List<PlanStep> generatePlan(String userInput) {
+    public List<PlanStep> generatePlan(String userInput) {
         log.debug("Generating plan");
 
         List<Message> messages = new ArrayList<>();

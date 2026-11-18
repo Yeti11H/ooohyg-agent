@@ -55,5 +55,6 @@ logs/
 # ===== 本地环境配置（不应提交） =====
 .env
 .env.local
+.agent-workflow/
 application-local.yml
 application-local.properties

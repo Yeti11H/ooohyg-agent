@@ -20,7 +20,7 @@
 
     <!--
       依赖说明（按当前源码实际使用生成）：
-      - 主模块 src/main/java 下 32 个类为纯 JDK 实现，零外部依赖（仅 java.util 等）；
+      - 核心策略保持 JDK + SLF4J；开发工作流使用 Jackson 持久化状态和解析工具参数；
       - spring-boot-starter 仅作为 Spring Boot 应用骨架保留，接入 web / 数据库 / AI 时按需添加；
       - 原底子 pom 中的 spring-ai-alibaba(dashscope)、ollama、pgvector/RAG、mcp-client、
         langchain4j、kryo、jsoup、itext、knife4j 等依赖在当前代码中无任何引用，已移除；
@@ -30,6 +30,10 @@
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.fasterxml.jackson.core</groupId>
+            <artifactId>jackson-databind</artifactId>
         </dependency>
         <dependency>
             <groupId>org.springframework.boot</groupId>

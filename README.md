@@ -24,6 +24,68 @@
 
 ## 快速开始
 
+### 开发工作流：从确认需求到可核验补丁
+
+工作流复用 Plan 与 ReAct。轻量模式只确认 Plan；完整模式依次确认 Intent、Spec 和 Plan。
+两种模式都固定基线提交，只有确认后才能写入任务自己的源码目录。运行状态和每版确认文档保存在本地。
+
+首版可执行范围是内置订单分页样例。离线脚本只替代模型决策，实际修改 Java 文件，并用本机
+JDK 编译、执行独立断言、生成 Git 补丁。公开 GitHub 导入是独立的只读入口，导入的仓库不执行构建、
+不调用模型、不写源码。
+
+用 JDK 21、Maven 和 Git 构建后，在 PowerShell 中执行：
+
+```powershell
+mvn package
+$jar = 'target/ooohyg-agent-0.0.1-SNAPSHOT.jar'
+java -jar $jar workflow start full order-list '订单列表太慢'
+$run = '复制上一步输出的 Run ID'
+java -jar $jar workflow answer $run 50
+```
+
+检查 Intent，复制当前 `Confirmation token`；按同样步骤确认
+新出现的 Spec 和 Plan。每条命令可在新终端运行，`status` 会显示当前草案以及确认码。
+
+```powershell
+java -jar $jar workflow status $run
+$token = '复制当前 Confirmation token'
+java -jar $jar workflow confirm $run $token
+# 重复确认 Spec 和 Plan，直到状态为 READY，再执行：
+java -jar $jar workflow execute $run
+```
+
+完整模式的第一个补丁刻意漏掉上限：旧排序检查通过，但请求 51 条的检查失败；返修后重新编译和验证
+默认 20 条、请求 49 / 50 / 51 条、顺序和导出。`patch.diff` 是最终补丁；`checks.json` 保存命令、退出码和逐轮结果；
+`acceptance.md` 单独报告已验证行为、审查状态和待人工处理项。无 DSH 审查时，完整模式的报告会显示
+`Acceptance incomplete`。中断后的再次执行会记录待检查状态，保留现有文件，不重复写入；检查后可启动新任务。
+默认产物目录为 `.agent-workflow/`，也可用 `WORKFLOW_HOME` 指定。
+
+轻量模式将第一条命令的 `full` 改成 `light`，回答页大小后只确认 Plan，然后执行。
+已通过独立检查的完整 `order-list` 任务会生成 Wiki 提案。人工检查后，使用
+`workflow wiki-publish <RUN_ID> <WIKI_APPROVAL_TOKEN>` 保存规则。再运行
+`workflow start light order-history '给历史订单增加分页' --wiki`，可以看到上限 50 进入计划，并追溯到原任务和来源。
+同题去掉 `--wiki` 时会停在澄清阶段；两组使用相同的样例基线，其中订单列表已经包含上限 50。
+`workflow start light export '调整后台导出' --wiki` 显示该规则不适用于导出。来源内容变更时条目标为待检查。
+
+公开仓库可用 `workflow import https://github.com/OWNER/REPO` 导入，随后用
+`workflow read <IMPORT_ID> README.md` 阅读选定提交上的文件。这里只支持标准公开 HTTPS 地址和小型仓库，
+不执行 Git hooks、子模块或仓库脚本。CLI 不支持私库、任意仓库补丁、新文件生成或自动发布。
+
+可选外部服务需要显式开启：
+
+- 任务创建时加 `--model=NAME`，并在本机设置 `WORKFLOW_CHAT_URL`（完整 HTTPS Chat Completions 地址）
+  和 `WORKFLOW_CHAT_KEY`。模型可调用内置样例的受限读写工具；工作流仍采用模板生成 Intent、Spec、Plan。
+- 任务创建时加 `--dsh`。配置 `DEEPSEEK_API_KEY`；Windows 上同时用 `WORKFLOW_DSH_SCRIPT` 指向本机可信的
+  DSH CLI `.mjs` 入口，其他系统可用 PATH 上的 `dsh-review`。每轮审查使用已提交的独立候选快照。
+  审查报告或快照不匹配时标为未完成；只有独立检查确认的已知边界问题才自动返修，其他发现由人工判断。
+
+模型服务和 DSH 都是可选集成；无需凭据即可重跑离线样例。工作流回归包括审批失效、断点保护、失败后返修、
+Wiki 适用范围及 DSH 报告校验：
+
+```powershell
+mvn '-Dtest=DevelopmentWorkflowTest' test
+```
+
 ### 依赖
 
 - Java 21

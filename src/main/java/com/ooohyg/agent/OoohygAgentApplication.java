@@ -1,5 +1,6 @@
 package com.ooohyg.agent;
 
+import com.ooohyg.agent.workflow.WorkflowCli;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 
@@ -14,6 +15,11 @@ import org.springframework.boot.autoconfigure.SpringBootApplication;
 public class OoohygAgentApplication {
 
     public static void main(String[] args) {
+        if (args.length > 0 && "workflow".equals(args[0])) {
+            int status = WorkflowCli.run(java.util.Arrays.copyOfRange(args, 1, args.length));
+            if (status != 0) System.exit(status);
+            return;
+        }
         SpringApplication.run(OoohygAgentApplication.class, args);
     }
 }
